@@ -1,0 +1,31 @@
+name: specification-instruction
+channels:
+- pytorch
+- nvidia
+- conda-forge
+- defaults
+
+dependencies:
+- python=3.10.9
+- jupyter
+- ipykernel
+- pandas=1.5.3
+- pytorch-cuda=11.7
+- torchvision 
+- torchaudio 
+- pytorch-cuda=11.7
+- scikit-learn
+- matplotlib
+- seaborn
+- accelerate
+- pip
+- pip:
+  - datasets
+  - wandb
+  - openai
+  - more-itertools
+  - sentencepiece
+  - transformers
+  - spacy
+  - nltk
+  - checklist
