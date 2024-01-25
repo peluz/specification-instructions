@@ -41,6 +41,10 @@ conda env create -f environment.yml
     - Run rat_eval.ipynb
 - Script 'significance_testing.py' runs the significance tests.
 
+## Model's generations
+- All model generations are available in the "results" folder
+- All ChatGPT responses are available in the "responses" folder
+
 
 ## Data notice
 - Our data folder contains the splits we use for the HateCheck data. The original suite can be found at https://github.com/paul-rottger/hatecheck-data and is distributed under a CC-BY-4.0 license.
