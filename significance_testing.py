@@ -4,8 +4,16 @@ from data_sets.data_utils import load_hsd_dataset
 from datasets import load_dataset, load_metric
 import pickle
 
+
+# In[2]:
+
+
 tasks = ["sa", "pi", "rc", "hsd"]
-models = ["flan-t5-small", "flan-t5-base", "flan-t5-large", "flan-t5-xl", "flan-t5-xxl", "chatGPT"]
+models = ["flan-t5-small", "flan-t5-base", "flan-t5-large", "flan-t5-xl", "flan-t5-xxl", "chatGPT", "zephyr-7b-beta"]
+try:
+    pvalues_dict = json.load(open("./results/pvalues.pickle", "r"))
+except FileNotFoundError:
+    pvalues_dict = {}
 methods = ["", "example", "from_chatGPT_example", "with_rules", "example_with_rules"]
 scores =  ["seen", "funcOut", "classOut", "baseline"]
 preds_by_task = {}
@@ -57,7 +65,7 @@ for task in tasks:
         datasets_by_task["hsd_f"] = founta_test
         # get_pvalues_g(task, preds, models, methods,"founta2018", founta_test)
 
-pvalues = get_pvalues_avg(["sa", "pi", "rc", "hsd_d", "hsd_f"], preds_by_task, models, methods, datasets_by_task, verbose=False)
+pvalues = {**pvalues_dict, **get_pvalues_avg(pvalues_dict, ["sa", "pi", "rc", "hsd_d", "hsd_f"], preds_by_task, models, methods, datasets_by_task, verbose=False)}
 with open(f"./results/pvalues.pickle", "wb") as file:
     pickle.dump(pvalues, file)  
 

@@ -4,6 +4,7 @@ import numpy as np
 import config
 from scipy.stats import binomtest, hmean
 from nltk.tokenize import sent_tokenize
+import collections
 import re
 import string
 from sklearn.metrics import f1_score
@@ -12,6 +13,16 @@ from tqdm.auto import tqdm
 from copy import deepcopy
 from pathlib import Path
 from collections import Counter
+
+model_order = ["small", "base", "large", "xl", "xxl", "beta" "chatGPT"]
+
+score_order = ["baseline", "Task", "Task+Rules", "Task+Spec"]
+
+add_order = ["", "+Ex", "(chatGPT)+Ex", "+Rat", "+Ex+Rat"]
+
+method_order = [score + add for score in score_order for add in add_order]
+
+order = {x: i for i, x in enumerate(model_order + method_order)}
 
 
 
@@ -38,10 +49,14 @@ def load_results(path, hatecheck=False, file_type="json"):
             model = children.name[:-(len(file_type)+1)]
             with open(children, "r") as file:
                     preds = json.load(file)
-                    if "rules" in model:
-                        preds = [1 if ("yes" in pred.lower()) or ("hateful" in pred.split()[-1].lower() and "not" not in pred.split()[-2]) else 0 for pred in preds]
-                    else:
-                        preds = [1 if "yes" in pred.lower() else 0 for pred in preds]
+                    # if "rules" in model:
+                    #     preds = [1 if ("yes" in pred.lower()) or ("hateful" in pred.split()[-1].lower() and "not" not in pred.split()[-2]) else 0 for pred in preds]
+                    # else:
+                    #     preds = [1 if "yes" in pred.lower() else 0 for pred in preds]
+                    try:
+                        preds = [extract_answer(pred.lower(), ["no", "yes"], "hsd") for pred in preds]
+                    except AttributeError:
+                        preds = [extract_answer(pred[0]["generated_text"].lower(), ["no", "yes"], "hsd") for pred in preds]
             hits = pd.DataFrame.from_dict({"funcs": funcs, "hits": (np.array(hatecheck_test["label_gold"])== np.array(preds)).astype(int), "labels": hatecheck_test["label_gold"]})
             hits_path = Path(f"{path}/{model}_hits.json")
             if not hits_path.exists():
@@ -61,11 +76,66 @@ def load_hits(path):
     return results
 
 
+def extract_answer_fallback(generation, option_range):
+    options = re.findall(rf'({option_range})', generation)
+    if len(options) == 0: return option_range.split("|")[0].replace(r"\b", "")
+        # choice = float(input(generation))
+        # print("============================")
+        # return choice[0], 1
+    options = Counter(options).most_common(2)
+    return options[0][0]
+
+def extract_answer(generation, options, task, verbose=False):
+    generation = generation.strip()
+    option_range = "|".join([rf"\b{x}\b" for x in options])
+    only = re.search(rf'^({option_range})$', generation)
+    answer = re.search(rf'(answer|output|ans) *(is)*:*[\n ]*\"*({option_range})', generation)
+    starts_with = re.search(rf'^({option_range})', generation)
+    ends_with =  re.search(rf'({option_range})\"*\.*$', generation)
+    if answer:
+        return options.index(answer.groups()[-1].split()[-1].lstrip("\""))
+    elif only:
+        return options.index(only.groups()[-1])
+    elif starts_with:
+        return options.index(starts_with.groups()[-1].rstrip(".,\n)"))
+    elif ends_with:
+        return options.index(ends_with.groups()[0])
+    else:
+        if task == "pi":
+            not_the_same = re.search(rf'not[^.]*same', generation)
+            not_different = re.search(rf'not[^.]*different', generation)
+            same = re.search(rf'same', generation)
+            different = re.search(rf'different', generation)
+            if not_the_same: return 0
+            elif not_different: return 1
+            elif same: return 1
+            elif different: return 0
+        if verbose:
+            print(generation)
+            print("==============")
+        return options.index(extract_answer_fallback(generation, option_range))
+    
+def extract_squad_answer(pred):
+    pred = pred.lower().strip()
+    answer_template = re.search(rf"the answer: (.*)", pred)
+    if answer_template:
+        return  answer_template.groups()[-1]
+    pred_segmented = pred.split("\n")
+    if len(pred_segmented) >=3: pred = "\n".join([x for x in pred_segmented if "rule list:" not in x and "explanation:" not in x])
+    answer_fallback = re.search(rf"((the *)|^|\n)(answer|output) *(is)*:*[\n ]*\"*(.+)", pred)
+    if answer_fallback:
+        return  answer_fallback.groups()[-1]
+    else:
+        sentences = sent_tokenize(pred)
+        if len(pred) == 0:
+            return ""
+        else:
+            return sentences[-1] if "rule" in sentences[0].lower() else sentences[0]
 
 def get_dataset_scores(task, results, labels, metric, with_preds=True):
     dataset_scores = {}
     dataset_preds = {}
-    for model, all_preds in results.items():
+    for model, all_preds in tqdm(results.items()):
         if type(all_preds[0]) in (str, np.str_):
             preds = all_preds
         else:
@@ -73,42 +143,51 @@ def get_dataset_scores(task, results, labels, metric, with_preds=True):
                 preds = [pred["generated_text"] for pred in all_preds]
             except KeyError:
                 preds = [pred["text"] for pred in all_preds]
+            except TypeError:
+                preds = [pred[0]["generated_text"] for pred in all_preds]
         if task == "sa":
-            if "rules" in model:
-                preds = [pred.split()[-1] for pred in preds]
-            preds = [1 if "positive" in pred.lower() else 0 for pred in preds]
+            # if "rules" in model:
+            #     preds = [pred.split()[-1] for pred in preds]
+            # preds = [1 if "positive" in pred.lower() else 0 for pred in preds]
+            preds = [extract_answer(pred.lower(), ["negative", "positive"], task) for pred in preds]
             references = labels
         elif task in ["hsd", "pi"]:
-            if "rules" in model:
-                if task == "pi":
-                    preds = [pred.split()[0] if ("yes" in pred.split()[0].lower() or "no" in pred.split()[0].lower()) else pred.split()[-1] for pred in preds]
-                    preds = [1 if "yes" in pred.lower() else 0 for pred in preds]
-                elif task == "hsd":
-                    preds = [1 if ("yes" in pred.lower()) or ("hateful" in pred.split()[-1].lower() and "not" not in pred.split()[-2]) else 0 for pred in preds]
-            else:
-                preds = [1 if "yes" in pred.lower() else 0 for pred in preds]
+            # if "rules" in model:
+            #     if task == "pi":
+            #         preds = [pred.split()[0] if ("yes" in pred.split()[0].lower() or "no" in pred.split()[0].lower()) else pred.split()[-1] for pred in preds]
+            #         preds = [1 if "yes" in pred.lower() else 0 for pred in preds]
+                # elif task == "hsd":
+                #     preds = [1 if ("yes" in pred.lower()) or ("hateful" in pred.split()[-1].lower() and "not" not in pred.split()[-2]) else 0 for pred in preds]
+            # else:
+                # preds = [1 if "yes" in pred.lower() else 0 for pred in preds]
+            preds = [extract_answer(pred.lower(), ["no", "yes"], task) for pred in preds]
             references = labels
         elif task == "rc":
-            if "rules" in model:
-                preds = []
-                for pred in all_preds:
-                    if "example" in model:
-                        try:
-                            preds.append(re.search("(?<=The answer: ).+"  , pred).group())
-                        except AttributeError:
-                            sentences = sent_tokenize(pred)
-                            if len(pred) == 0:
-                                preds.append("")
-                            else:
-                                preds.append(sentences[-1])
-                    else:
-                        sentences = sent_tokenize(pred)
-                        if len(pred) == 0:
-                            preds.append("")
-                        else:
-                            preds.append(sentences[-1] if "rule" in sentences[0].lower() else sentences[0])
-                all_preds = preds
-            preds = [{"prediction_text": pred, "id": i} for i, pred in enumerate(all_preds)]
+            processed_path = Path(f"./results/rc/squad/{model}_processed.json")
+            if processed_path.exists():
+                preds = json.load(open(processed_path, "r"))
+            # if "rules" in model:
+            #     processed_preds = []
+            #     for pred in preds:
+            #         if "example" in model:
+            #             try:
+            #                 processed_preds.append(re.search("(?<=The answer: ).+"  , pred).group())
+            #             except AttributeError:
+            #                 sentences = sent_tokenize(pred)
+            #                 if len(pred) == 0:
+            #                     processed_preds.append("")
+            #                 else:
+            #                     processed_preds.append(sentences[-1])
+            #         else:
+            #             sentences = sent_tokenize(pred)
+            #             if len(pred) == 0:
+            #                 processed_preds.append("")
+            #             else:
+            #                 processed_preds.append(sentences[-1] if "rule" in sentences[0].lower() else sentences[0])
+            #         preds = processed_preds
+            else:
+                preds = [{"prediction_text": extract_squad_answer(pred), "id": i} for i, pred in enumerate(preds)]
+                # json.dump(preds, open(processed_path, "w"))
             references  = [{"answers": answer, "id": i} for i, answer in enumerate(labels)]
         dataset_scores[model] = metric.compute(predictions=preds, references=references)
         dataset_preds[model] = preds
@@ -116,7 +195,7 @@ def get_dataset_scores(task, results, labels, metric, with_preds=True):
 
 def get_suite_preds(results, task):
     suite_preds = {}
-    for model, all_preds in results.items():
+    for model, all_preds in tqdm(results.items()):
         if type(all_preds[0]) == str:
             preds = all_preds
         else:
@@ -124,35 +203,40 @@ def get_suite_preds(results, task):
                 preds = [pred["generated_text"] for pred in all_preds]
             except KeyError:
                 preds = [pred["text"] for pred in all_preds]
+            except TypeError:
+                preds = [pred[0]["generated_text"] for pred in all_preds]
         if task == "sa":
-            if "rules" in model:
-                preds = [pred.split()[-1] for pred in preds]
-            suite_preds[model] = [2 if "positive" in pred.lower() else (1 if "neutral" in pred.lower() else 0) for pred in preds]
+            # if "rules" in model:
+            #     preds = [pred.split()[-1] for pred in preds]
+            # suite_preds[model] = [2 if "positive" in pred.lower() else (1 if "neutral" in pred.lower() else 0) for pred in preds]
+            suite_preds[model] = [extract_answer(pred.lower(), ["negative", "neutral", "positive"], task) for pred in preds]
         elif task == "rc":
-            if "rules" in model:
-                processed_preds = []
-                for pred in preds:
-                    if "example" in model:
-                        try:
-                            processed_preds.append(re.search("(?<=The answer: ).+"  , pred).group())
-                        except AttributeError:
-                            sentences = sent_tokenize(pred)
-                            if len(pred) == 0:
-                                processed_preds.append("")
-                            else:
-                                processed_preds.append(sentences[-1])
-                    else:
-                        sentences = sent_tokenize(pred)
-                        if len(pred) == 0:
-                            processed_preds.append("")
-                        else:
-                            processed_preds.append(sentences[-1] if "rule" in sentences[0].lower() else sentences[0])
-                preds = processed_preds
+            # if "rules" in model:
+            #     processed_preds = []
+            #     for pred in preds:
+            #         if "example" in model:
+            #             try:
+            #                 processed_preds.append(re.search("(?<=The answer: ).+"  , pred).group())
+            #             except AttributeError:
+            #                 sentences = sent_tokenize(pred)
+            #                 if len(pred) == 0:
+            #                     processed_preds.append("")
+            #                 else:
+            #                     processed_preds.append(sentences[-1])
+            #         else:
+            #             sentences = sent_tokenize(pred)
+            #             if len(pred) == 0:
+            #                 processed_preds.append("")
+            #             else:
+            #                 processed_preds.append(sentences[-1] if "rule" in sentences[0].lower() else sentences[0])
+            #     preds = processed_preds
+            preds = [extract_squad_answer(pred) for pred in preds]
             suite_preds[model] = [normalize_answer(pred) for pred in preds]
         elif task == "pi":
-            if "rules" in model:
-                preds = [pred.split()[0] if ("yes" in pred.split()[0].lower() or "no" in pred.split()[0].lower()) else pred.split()[-1] for pred in preds]
-            suite_preds[model] = [1 if "yes" in pred.lower() else 0 for pred in preds]
+            # if "rules" in model:
+            #     preds = [pred.split()[0] if ("yes" in pred.split()[0].lower() or "no" in pred.split()[0].lower()) else pred.split()[-1] for pred in preds]
+            # suite_preds[model] = [1 if "yes" in pred.lower() else 0 for pred in preds]
+            suite_preds[model] = [extract_answer(pred.lower(), ["no", "yes"], task) for pred in preds]
         else:
             raise NotImplementedError
     return suite_preds
@@ -572,8 +656,7 @@ def get_pvalues_g(task, preds, models, methods, dataset, test):
             json.dump(pvalues, file)  
     return pvalues
 
-def get_pvalues_avg(tasks, preds, models, methods, tests, verbose=False):
-    pvalues = {}
+def get_pvalues_avg(pvalues, tasks, preds, models, methods, tests, verbose=False):
     baseline_hits_dataset_by_task_zero = {}
     baseline_hits_dataset_by_task_example = {}
     baseline_hits_suite_by_task_score_zero = {}
@@ -607,6 +690,8 @@ def get_pvalues_avg(tasks, preds, models, methods, tests, verbose=False):
             baseline_hits_suite_by_task_score_zero[task] = [deepcopy(baseline_hits_suite_zero) for _ in range(3)]
             baseline_hits_suite_by_task_score_example[task] = [deepcopy(baseline_hits_suite_example) for _ in range(3)]
         for method in methods:
+            if (model, method) in pvalues.keys():
+                break
             suffix = f"_{method}" if len(method) > 0 else method
             key = f"{model}{suffix}"
             example = "example" in key
@@ -705,3 +790,47 @@ def get_pvalues_suite_control(task, models):
         with open(f"./data/{task}/suite/pvalues_control.json", "w") as file:
             json.dump(pvalues, file)
     return pvalues
+
+def process_df(df):
+    df['model'] = [x.split("_")[0] for x in df.index]
+    df['method'] = [x.split("_")[1] for x in df.index]
+    df["score"] = df["method"]
+    df['method'] = ["Task" if "baseline" in x else f"Task+Rules" for x in df.method]
+    df['method'] = [y+"(chatGPT)"  if "from_chatGPT" in x else y for x,y in zip(df.index, df.method)]
+    df['method'] =  [y+"+Ex"  if "example" in x else y for x,y in zip(df.index, df.method)]
+    df['method'] =  [y+"+Rat"  if "rules" in x else y for x,y in zip(df.index, df.method)]
+    df["model"] = df.model.str.split("-").str[-1]
+    df = df.sort_values(["model", "method"], key=lambda x: x.map(order))
+    return df
+
+def dataset_hits_df(task, result_path, dataset_test, metric, label_col="label"):
+    results = load_results(result_path)
+    results = {k: v for k, v in results.items() if "seen" in k or "baseline" in k}
+    dataset_scores, preds = get_dataset_scores(task, results, dataset_test[label_col], metric)
+    labels = dataset_test[label_col] if task != "rc" else [x["text"] for x in dataset_test["answers"]]
+    hits = {}
+    for model, pred in preds.items():
+        if task != "rc":
+            hits[model] = (np.array(pred) == np.array(labels)).astype(int)
+        else:
+            hits[model] = np.array([metric_max_over_ground_truths(exact_match_score, p["prediction_text"], label) for p, label in zip(pred, labels)]).astype(int)
+    df = pd.DataFrame(hits).T
+    df = process_df(df)
+    return df, results
+
+
+def suite_hits_df(task, path, suite_test):
+    hits = load_hits(path)
+    all_hits = {}
+    for model, hit in hits.items():
+        all_hits.setdefault(model, []).extend([x for v in hit.values() for x in v])
+    if task == "sa":
+        suite_test = suite_test.filter(lambda x: x["functionality"] not in  ['"used to" should reduce', 'reducers'])
+    test_id_to_row = collections.OrderedDict()
+    if task != "hsd":
+        for i, ex in enumerate(suite_test):
+            test_id_to_row.setdefault((ex["functionality"], ex["test_id"]), []).append(i)
+    df = pd.DataFrame(all_hits).T
+    df = process_df(df)
+    df = df[(df.score == "seen") | (df.score == "baseline")]
+    return df, test_id_to_row

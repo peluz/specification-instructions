@@ -3,17 +3,16 @@ from models.inference import *
 from datasets import load_dataset, concatenate_datasets
 from utils.util import initialize_seeds
 from utils.prompts import *
-from transformers import DataCollatorWithPadding, T5TokenizerFast
+from transformers import AutoModelForCausalLM, AutoTokenizer, pipeline
 import config
 import json
 from pathlib import Path
-import numpy as np
 import pickle
 import argparse
 import torch
 
 
-def main(task="sa",model_url=None, bs=None, chatGPT=False, methods="all", ask_rule=False, add_examples=False, from_chatGPT=False):
+def main(task="sa",model_url=None, chatGPT=False, methods="all", ask_rule=False, add_examples=False, from_chatGPT=False):
     initialize_seeds()
     if not chatGPT:
         model_name = model_url.split("/")[-1]
@@ -60,22 +59,21 @@ def main(task="sa",model_url=None, bs=None, chatGPT=False, methods="all", ask_ru
         davidson_examples_per_label = founta_examples_per_label = examples_per_label = None
 
     if not chatGPT:
-        num_gpus = torch.cuda.device_count()
-        print(num_gpus)
-        tokenizer = T5TokenizerFast.from_pretrained(model_url)
-        model = load_model(model_url, num_gpus)
-        if num_gpus > 1:
-            print(model.hf_device_map)
-        data_collator = DataCollatorWithPadding(tokenizer)
+        if "zephyr" in model_url.lower():
+            model = AutoModelForCausalLM.from_pretrained(model_url, attn_implementation="flash_attention_2", torch_dtype=torch.bfloat16, device_map="auto")
+            tokenizer = AutoTokenizer.from_pretrained(model_url)
+            pipe = pipeline("text-generation", model=model, tokenizer=tokenizer, device_map="auto")
+        else:
+            pipe = pipeline(model=model_url, device_map="auto")
     else:
         api_token = config.openai_key
-        if not add_examples:
-            if task != "rc":
-                output_format = "Output exactly one of the options.\n"
-            else:
-                output_format = "Output a concise, minimal answer.\n"
+    if not add_examples:
+        if task != "rc":
+            output_format = "\nOutput exactly one of the options."
         else:
-            output_format = ""
+            output_format = "\nOutput a concise, minimal answer."
+    else:
+        output_format = ""
     max_new_tokens=90 if task=="rc" else 20
     suffix = ""
     if from_chatGPT:
@@ -98,7 +96,7 @@ def main(task="sa",model_url=None, bs=None, chatGPT=False, methods="all", ask_ru
     func_to_class = {func: func_class for func_class, funcs in class_to_funcs.items() for func in funcs.keys()}
 
     if task == "hsd":
-        for method in ["baseline", "seen"]:
+        for method in ["seen", "baseline"]:
             if method != "baseline":
                 davidson_result = Path(f"./results/{task}/davidson2017/{model_name}_{method}{suffix}.json")
                 founta_result = Path(f"./results/{task}/founta2018/{model_name}_{method}{suffix}.json")
@@ -122,7 +120,8 @@ def main(task="sa",model_url=None, bs=None, chatGPT=False, methods="all", ask_ru
                         json.dump(responses, file)
 
                 else:
-                    all_preds = get_preds(all_prompts, tokenizer, model, data_collator, bs=bs, max_new_tokens=max_new_tokens)
+                    bs_file =  Path(f"./models/{model_name}/{task}/davidson2017/{method}{suffix}.json")
+                    all_preds = get_preds(all_prompts, pipe, model_url, output_format, bs_file, max_new_tokens=max_new_tokens)
                 davidson_result.parent.mkdir(exist_ok=True, parents=True)
                 with open(davidson_result, "w") as file:
                     json.dump(all_preds, file)
@@ -140,7 +139,8 @@ def main(task="sa",model_url=None, bs=None, chatGPT=False, methods="all", ask_ru
                     with open(response_path, "w") as file:
                         json.dump(responses, file)
                 else:
-                    all_preds = get_preds(all_prompts, tokenizer, model, data_collator, bs=bs, max_new_tokens=max_new_tokens)
+                    bs_file =  Path(f"./models/{model_name}/{task}/founta2018/{method}{suffix}.json")
+                    all_preds = get_preds(all_prompts, pipe, model_url, output_format, bs_file, max_new_tokens=max_new_tokens)
                 founta_result.parent.mkdir(exist_ok=True, parents=True)
                 with open(founta_result, "w") as file:
                     json.dump(all_preds, file)
@@ -167,7 +167,8 @@ def main(task="sa",model_url=None, bs=None, chatGPT=False, methods="all", ask_ru
                     with open(response_path, "w") as file:
                         json.dump(responses, file)
                 else:
-                    all_preds = get_preds(all_prompts, tokenizer, model, data_collator, bs=bs, max_new_tokens=max_new_tokens)
+                    bs_file =  Path(f"./models/{model_name}/{task}/{dataset_name}/{method}{suffix}.json")
+                    all_preds = get_preds(all_prompts, pipe, model_url, output_format, bs_file, max_new_tokens=max_new_tokens)
                 dataset_result.parent.mkdir(exist_ok=True, parents=True)
                 with open(dataset_result, "w") as file:
                     json.dump(all_preds, file)
@@ -197,7 +198,8 @@ def main(task="sa",model_url=None, bs=None, chatGPT=False, methods="all", ask_ru
                 with open(response_path, "w") as file:
                     json.dump(responses, file)
             else:
-                all_preds = get_preds(all_prompts, tokenizer, model, data_collator, bs=bs, max_new_tokens=max_new_tokens)
+                bs_file =  Path(f"./models/{model_name}/{task}/suite/{method}{suffix}.json")
+                all_preds = get_preds(all_prompts, pipe, model_url, output_format, bs_file, max_new_tokens=max_new_tokens)
             result.parent.mkdir(exist_ok=True, parents=True)
             with open(result, "w") as file:
                 json.dump(all_preds, file)
@@ -221,6 +223,5 @@ if __name__ == '__main__':
                         action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument('--from_chatGPT', help='Use chatGPT-generated functionality descriptions', type=str,
                         action=argparse.BooleanOptionalAction, default=False)
-    parser.add_argument('--bs', help='Prompts per batch', type=int, default=128)
     args = parser.parse_args()
-    main(args.task, args.model_url, args.bs, args.chatGPT, args.methods, args.ask_rule, args.add_examples, args.from_chatGPT)
+    main(args.task, args.model_url, args.chatGPT, args.methods, args.ask_rule, args.add_examples, args.from_chatGPT)
